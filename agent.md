@@ -132,15 +132,20 @@ grep 'val_bpb:' run.log
 Work with the human once, then run the loop (§7.5):
 
 1. **Agree on a run tag** (e.g. `mar28` or `2026-03-28`). Branch **`research/<tag>`** must **not** already exist for a fresh run, or use **`research/<tag>-gpu0`** for a parallel GPU track. (Prefix `research/` avoids clashing with upstream naming.)
-2. **Create the branch:** `git fetch origin && git checkout main && git pull` (if applicable), then `git checkout -b research/<tag>`.
-3. **Read in-scope files** before editing:
+2. **Align with the canonical OpenAI repo (fork maintenance).** This working copy is a **fork**; keep an explicit line to **[openai/parameter-golf](https://github.com/openai/parameter-golf)** so challenge rules and `train_gpt.py` do not silently diverge.
+   - Ensure a remote exists, e.g. `git remote add upstream https://github.com/openai/parameter-golf.git` (name `upstream` or `openai` is fine—pick one and use it consistently).
+   - **`git fetch <that-remote>`** on `main` (after `git checkout main` and updating `origin` if needed).
+   - **Inventory drift:** `git log --oneline main..<that-remote>/main` and a scoped diff, e.g. **`git diff main...<that-remote>/main -- train_gpt.py README.md`** (expand paths if you care about other upstream files).
+   - **With the human:** merge or rebase upstream into this fork’s `main` before cutting `research/<tag>`, *or* record “we intentionally stay behind on X because Y.” Local-only files (e.g. this `agent.md`, lab scripts under `scripts/`) should stay clearly **non-upstream** so a future PR is intentional.
+3. **Create the branch:** `git fetch origin && git checkout main && git pull` (if applicable), then `git checkout -b research/<tag>`.
+4. **Read in-scope files** before editing:
    - [README.md](README.md) — challenge rules, FAQ, integrity.
    - [data/README.md](data/README.md) — data layout, tokenizer, export notes.
    - [`train_gpt.py`](train_gpt.py) — `Hyperparameters`, model, training loop, eval, int8+zlib serialization.
    - [program.md](program.md) — this guide.
-4. **Verify data:** `fineweb_train_*.bin`, `fineweb_val_*.bin`, and tokenizer at `TOKENIZER_PATH`; if missing, run `python3 data/cached_challenge_fineweb.py --variant sp1024` (see §4).
-5. **Initialize `results.tsv`** with the header row only (see §7.5). The baseline row is filled after the first run.
-6. **Confirm** with the human that setup looks good, then enter the experiment loop.
+5. **Verify data:** `fineweb_train_*.bin`, `fineweb_val_*.bin`, and tokenizer at `TOKENIZER_PATH`; if missing, run `python3 data/cached_challenge_fineweb.py --variant sp1024` (see §4).
+6. **`results.tsv`** is created automatically on the first **successful** [`train_gpt.py`](train_gpt.py) run (see §7.5). No manual header row is required.
+7. **Confirm** with the human that setup looks good, then enter the experiment loop.
 
 ### 7.2 What you CAN / CANNOT do
 
@@ -174,46 +179,58 @@ Work lives on **`research/<tag>`** (or the branch agreed in §7.1).
 
 **Logging results (`results.tsv`)**
 
-When an experiment finishes, append a row (tab-separated, **not** CSV — commas break in descriptions):
+[`train_gpt.py`](train_gpt.py) **appends** one row per run (tab-separated, **not** CSV — commas break in descriptions). Only **rank 0** writes (single-GPU or `torchrun` master).
 
 ```text
 commit	val_bpb	memory_gb	status	description
 ```
 
 1. git commit hash (short, **7** chars)
-2. **`val_bpb`** from **`final_int8_zlib_roundtrip`** — use **0.000000** for crashes
-3. peak VRAM **GB**, **.1f** (from logs if available; else **0.0**)
-4. **status:** `keep` / `discard` / `crash`
-5. short description of the change (**include paper/link hints** per §7.4 when applicable)
+2. **`val_bpb`** from **`final_int8_zlib_roundtrip`** — **0.000000** for crashes
+3. peak VRAM **GB**, **.1f** (from `torch.cuda.max_memory_allocated()` at end of run)
+4. **status:** **`COMPLETE`** (successful run), **`CRASH`** (uncaught exception), or manually **`keep`** / **`discard`** if you edit the file after a compare/revert workflow
+5. **description:** from **`EXPERIMENT_DESC`** (default `train_gpt`). Put paper/link hints per §7.4 there.
 
-Example:
+**Environment overrides**
+
+- **`EXPERIMENT_DESC`** — short description for the row (default `train_gpt`).
+- **`RESULTS_TSV_PATH`** — path to the TSV (default `results.tsv` in the cwd).
+- **`DISABLE_RESULTS_TSV=1`** — skip all TSV writes.
+
+Example (after a few runs):
 
 ```text
 commit	val_bpb	memory_gb	status	description
-a1b2c3d	1.234500	44.0	keep	baseline
-b2c3d4e	1.230000	44.2	keep	lower MATRIX_LR; Ref: https://arxiv.org/...
+a1b2c3d	1.234500	44.0	COMPLETE	baseline; Ref: https://arxiv.org/...
+b2c3d4e	1.230000	44.2	COMPLETE	lower MATRIX_LR; Ref: https://arxiv.org/...
 ```
 
-**Do not commit `results.tsv`** to git (keep it untracked or gitignored locally).
+**Do not commit `results.tsv`** to git (it is gitignored locally).
 
 **LOOP** (repeat until manually stopped):
 
-1. Note **branch** and **short commit**.
-2. **Research / ideation** (§7.4).
-3. Implement **one** focused change in **`train_gpt.py`** (or env-only change if appropriate).
-4. `git commit`.
-5. Run training with full log redirect, e.g. **`torchrun ... train_gpt.py > run.log 2>&1`** as in §5 — **no `tee`**, do not dump huge logs into agent context.
-6. Parse logs (same greps as **§6**): **`grep 'final_int8_zlib_roundtrip' run.log`** and **`grep 'Total submission size int8+zlib' run.log`**; optionally **`grep 'val_bpb:' run.log`** if `VAL_LOSS_EVERY` is set. If those lines are missing, **`tail -n 50 run.log`** and treat as crash or mis-run.
-7. Append **`results.tsv`**. **VRAM** is a **soft** constraint: some increase is acceptable for meaningful **`val_bpb`** gains, but avoid runaway memory.
-8. **Advance or revert:** if **round-trip `val_bpb` improves** (lower), **`Total submission size int8+zlib`** is under **16 000 000**, and §7.3 accepts the complexity — **keep** the commit. Otherwise **discard** (e.g. `git checkout -- train_gpt.py` or reset). If **`val_bpb`** is flat or worse, revert rather than stacking noise.
+1. **Records-informed direction (human choice).** At **session start**, and again **when pivoting** after a dead end or a major discard, mine **this repo’s** [`records/`](records/) (not only the web) for evidence-backed ideas.
+   - **Scan:** `records/track_10min_16mb/*/submission.json`, `README.md`, and any `RESULTS.md` or `train*.log` in those folders; use **`track_non_record_16mb`** for *mechanism* inspiration (long runs, extreme quant) but label **official-track claims** only from 10 min evidence.
+   - **Extract numbers:** from each interesting row, note at least **`val_bpb`** (lower better), **`bytes_total`** / submission size, and any **multi-seed** or **ablation** tables in README (Δ`val_bpb`, wall time, tokenizer / seq length if relevant).
+   - **Propose exactly three routes** that differ in **mechanism** (e.g. architecture/attention pattern vs quant+QAT/serialization vs optimizer+schedule+throughput vs eval/context recipe)—not three learning-rate tweaks of the same trick.
+   - **For each route, argue “why it might work here”** with **data tied to `records/`**: quote **submission name or path**, **numeric `val_bpb` (and gap vs a named weaker baseline in the same README)**, **artifact size headroom** if that motivates a change, and **caveats** (different tokenizer, non-record wall clock, int6+zstd vs int8+zlib in [`train_gpt.py`](train_gpt.py), etc.). If two submissions are not comparable under challenge rules, say so explicitly.
+   - **Stop and let the human pick** route **A / B / C** (or a strict rank order). Put that choice in the next **`results.tsv`** description. While executing the chosen route, **§7.6’s “do not stop to ask”** still applies *except* for this triage / pivot checkpoint.
+2. Note **branch** and **short commit**.
+3. **Research / ideation** (§7.4), biased toward the chosen route.
+4. Implement **one** focused change in **`train_gpt.py`** (or env-only change if appropriate).
+5. `git commit`.
+6. Run training with full log redirect, e.g. **`torchrun ... train_gpt.py > run.log 2>&1`** as in §5 — **no `tee`**, do not dump huge logs into agent context.
+7. Parse logs (same greps as **§6**): **`grep 'final_int8_zlib_roundtrip' run.log`** and **`grep 'Total submission size int8+zlib' run.log`**; optionally **`grep 'val_bpb:' run.log`** if `VAL_LOSS_EVERY` is set. If those lines are missing, **`tail -n 50 run.log`** and treat as crash or mis-run. **`results.tsv`** is updated automatically by **`train_gpt.py`** (`COMPLETE` or `CRASH`); you may optionally edit rows to **`keep`** / **`discard`** for bookkeeping.
+8. **VRAM** is a **soft** constraint: some increase is acceptable for meaningful **`val_bpb`** gains, but avoid runaway memory.
+9. **Advance or revert:** if **round-trip `val_bpb` improves** (lower), **`Total submission size int8+zlib`** is under **16 000 000**, and §7.3 accepts the complexity — **keep** the commit. Otherwise **discard** (e.g. `git checkout -- train_gpt.py` or reset). If **`val_bpb`** is flat or worse, revert rather than stacking noise.
 
 **First run in a session:** always establish a **baseline** (stock or agreed starting `train_gpt.py`) before comparing ideas.
 
 ### 7.6 Timeouts, crashes, agent mode
 
 - **Timeouts:** This lab expects ~**30  minutes** training (`MAX_WALLCLOCK_SECONDS=1800`) plus eval/quantization. If wall clock goes far beyond ~**2×** that budget or the process hangs, kill it, inspect **`tail -n 50 run.log`**, revert or fix.
-- **Crashes:** trivial fixes (typo, import) → fix and re-run. Fundamentally broken idea → log **`crash`** in **`results.tsv`**, move on.
-- **Agent mode:** After §7.1 setup, **do not** stop to ask whether to continue. Keep iterating until **manually** interrupted. If stuck, **search again** (§7.4), re-read **`train_gpt.py`** / README, combine prior near-misses, or try bolder architectural changes.
+- **Crashes:** trivial fixes (typo, import) → fix and re-run. Fundamentally broken idea → **`train_gpt.py`** logs **`CRASH`** in **`results.tsv`** automatically; move on.
+- **Agent mode:** After §7.1 setup, **do not** stop to ask whether to continue. Keep iterating until **manually** interrupted. **Exception:** the **§7.5 loop step 1** records triage requires a **human route choice** at session start or when pivoting. If stuck, **search again** (§7.4), re-read **`train_gpt.py`** / README, **re-scan `records/`** for a new three-route menu, combine prior near-misses, or try bolder architectural changes.
 
 ## 8. Submission checklist (abbreviated)
 

@@ -28,6 +28,89 @@ from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 # -----------------------------
+# results.tsv (autolog for analysis.ipynb; see agent.md §7.5)
+# -----------------------------
+
+
+def _git_commit_short() -> str:
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short=7", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        return out or "unknown"
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def _sanitize_results_description(text: str) -> str:
+    return " ".join(text.replace("\t", " ").replace("\r", " ").splitlines())
+
+
+def append_results_tsv_row(
+    path: Path,
+    *,
+    commit: str,
+    val_bpb: float,
+    memory_gb: float,
+    status: str,
+    description: str,
+) -> None:
+    """Append one tab-separated row; create file with header if missing."""
+    desc = _sanitize_results_description(description)
+    if len(desc) > 500:
+        desc = desc[:497] + "..."
+    line = f"{commit}\t{val_bpb:.6f}\t{memory_gb:.1f}\t{status}\t{desc}\n"
+    header = "commit\tval_bpb\tmemory_gb\tstatus\tdescription\n"
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    is_new = not path.exists() or path.stat().st_size == 0
+    with open(path, "a", encoding="utf-8") as f:
+        if is_new:
+            f.write(header)
+        f.write(line)
+
+
+def _results_tsv_enabled() -> bool:
+    v = os.environ.get("DISABLE_RESULTS_TSV", "").strip().lower()
+    return v not in ("1", "true", "yes")
+
+
+def _results_tsv_path() -> Path:
+    return Path(os.environ.get("RESULTS_TSV_PATH", "results.tsv"))
+
+
+def _experiment_desc() -> str:
+    return os.environ.get("EXPERIMENT_DESC", "train_gpt").strip() or "train_gpt"
+
+
+def _should_write_results_tsv() -> bool:
+    return int(os.environ.get("RANK", "0")) == 0
+
+
+def log_results_tsv_crash() -> None:
+    if not _results_tsv_enabled() or not _should_write_results_tsv():
+        return
+    mem_gb = 0.0
+    try:
+        if torch.cuda.is_available():
+            mem_gb = torch.cuda.max_memory_allocated() / (1024**3)
+    except Exception:
+        pass
+    append_results_tsv_row(
+        _results_tsv_path(),
+        commit=_git_commit_short(),
+        val_bpb=0.0,
+        memory_gb=mem_gb,
+        status="CRASH",
+        description=f"{_experiment_desc()} (crash)",
+    )
+
+
+# -----------------------------
 # HYPERPARAMETERS
 # -----------------------------
 # Default Simple Baseline run:
@@ -723,6 +806,28 @@ class GPT(nn.Module):
         logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
         return F.cross_entropy(logits.float(), targets, reduction="mean")
 
+    def forward_logits(self, input_ids: Tensor) -> Tensor:
+        """Return per-position logits for next-token prediction. Shape [B, T, vocab_size]."""
+        x = self.tok_emb(input_ids)
+        x = F.rms_norm(x, (x.size(-1),))
+        x0 = x
+        skips: list[Tensor] = []
+        for i in range(self.num_encoder_layers):
+            x = self.blocks[i](x, x0)
+            skips.append(x)
+        for i in range(self.num_decoder_layers):
+            if skips:
+                x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
+            x = self.blocks[self.num_encoder_layers + i](x, x0)
+        x = self.final_norm(x)
+        if self.tie_embeddings:
+            logits_proj = F.linear(x, self.tok_emb.weight)
+        else:
+            if self.lm_head is None:
+                raise RuntimeError("lm_head is required when tie_embeddings=False")
+            logits_proj = self.lm_head(x)
+        return self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
+
 
 # -----------------------------
 # TRAINING
@@ -1118,9 +1223,24 @@ def main() -> None:
     )
     log0(f"final_int8_zlib_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
 
+    if master_process and _results_tsv_enabled():
+        mem_gb = torch.cuda.max_memory_allocated() / (1024**3)
+        append_results_tsv_row(
+            _results_tsv_path(),
+            commit=_git_commit_short(),
+            val_bpb=float(q_val_bpb),
+            memory_gb=mem_gb,
+            status="COMPLETE",
+            description=_experiment_desc(),
+        )
+
     if distributed:
         dist.destroy_process_group()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        log_results_tsv_crash()
+        raise
