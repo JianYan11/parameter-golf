@@ -10,6 +10,9 @@ Usage (from repo root, after training produced final_model.pt):
     --checkpoint final_model.pt \
     --tokenizer ./data/tokenizers/fineweb_1024_bpe.model
 
+``--checkpoint`` also accepts ``final_model.int8.ptz`` (zlib + int8 payload from train_gpt),
+checkpoints saved under a ``state_dict`` / ``model`` key, and DDP-style ``module.*`` prefixes.
+
 Architecture must match training (same env as train_gpt.py, e.g. VOCAB_SIZE=1024).
 
 CPU-only is supported; CUDA/MPS used when available.
@@ -26,8 +29,10 @@ from __future__ import annotations
 
 import argparse
 import glob
+import io
 import os
 import sys
+import zlib
 from pathlib import Path
 
 import sentencepiece as spm
@@ -38,7 +43,12 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from train_gpt import GPT, Hyperparameters, load_data_shard  # noqa: E402
+from train_gpt import (  # noqa: E402
+    GPT,
+    Hyperparameters,
+    dequantize_state_dict_int8,
+    load_data_shard,
+)
 
 
 def _color_enabled() -> bool:
@@ -116,6 +126,59 @@ def build_model(args: Hyperparameters) -> GPT:
         rope_base=args.rope_base,
         qk_gain_init=args.qk_gain_init,
     )
+
+
+def _is_plain_state_dict(obj: object) -> bool:
+    if not isinstance(obj, dict) or not obj:
+        return False
+    return all(isinstance(k, str) and isinstance(v, torch.Tensor) for k, v in obj.items())
+
+
+def _strip_module_prefix(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    keys = list(state.keys())
+    if keys and all(k.startswith("module.") for k in keys):
+        return {k[len("module.") :]: v for k, v in state.items()}
+    return state
+
+
+def _torch_load_any(file_or_buffer: str | Path | io.BytesIO, map_location: torch.device | str) -> object:
+    try:
+        return torch.load(file_or_buffer, map_location=map_location, weights_only=True)  # type: ignore[call-overload]
+    except TypeError:
+        return torch.load(file_or_buffer, map_location=map_location)
+
+
+def load_checkpoint_state_dict(checkpoint_path: Path, map_location: torch.device) -> dict[str, torch.Tensor]:
+    """Load weights written by ``train_gpt.py`` (``final_model.pt`` or ``final_model.int8.ptz``) or compatible dicts."""
+    path = Path(checkpoint_path)
+    if path.suffix.lower() == ".ptz":
+        with open(path, "rb") as f:
+            raw = zlib.decompress(f.read())
+        obj = _torch_load_any(io.BytesIO(raw), map_location="cpu")
+    else:
+        obj = _torch_load_any(path, map_location=map_location)
+
+    state: dict[str, torch.Tensor]
+    if isinstance(obj, dict) and obj.get("__quant_format__") == "int8_clean_per_row_v1":
+        state = dequantize_state_dict_int8(obj)
+    elif isinstance(obj, dict):
+        for key in ("state_dict", "model_state_dict", "model"):
+            inner = obj.get(key)
+            if _is_plain_state_dict(inner):
+                state = inner
+                break
+        else:
+            if not _is_plain_state_dict(obj):
+                hint = (
+                    "Expected a PyTorch state_dict (str -> Tensor), "
+                    "train_gpt int8 blob (``__quant_format__``), or a dict with a ``state_dict`` / ``model`` entry."
+                )
+                raise ValueError(f"Unrecognized checkpoint structure in {path}: {type(obj)}. {hint}")
+            state = obj
+    else:
+        raise ValueError(f"Checkpoint must deserialize to a dict, got {type(obj)} from {path}")
+
+    return _strip_module_prefix(state)
 
 
 def show_val_sample(
@@ -203,7 +266,12 @@ def stream_continuation(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Decode val sample + continuation demo for train_gpt checkpoints.")
-    parser.add_argument("--checkpoint", type=str, default="final_model.pt", help="Path to final_model.pt")
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default="final_model.pt",
+        help="Path to final_model.pt, final_model.int8.ptz (zlib int8), or a plain state_dict / wrapped checkpoint",
+    )
     parser.add_argument("--tokenizer", type=str, default=None, help="SentencePiece .model path")
     parser.add_argument("--data-path", type=str, default=None, help="Dataset dir with fineweb_val_*.bin (for --show-sample)")
     parser.add_argument("--no-show-sample", action="store_true", help="Skip printing val shard preview")
@@ -239,7 +307,7 @@ def main() -> None:
     device = pick_device()
     sp = spm.SentencePieceProcessor(model_file=tok_path)
     model = build_model(hp).to(device)
-    state = torch.load(ckpt, map_location=device)
+    state = load_checkpoint_state_dict(ckpt, map_location=device)
     model.load_state_dict(state, strict=True)
     model.eval()
     if device.type == "cuda":

@@ -26,6 +26,73 @@ The challenge runs from March 18th to April 30th.
 
 Happy training!
 
+## Contestant toolkit (this fork)
+
+This repository is a **[community fork](https://github.com/JianYan11/parameter-golf)** of the official **[openai/parameter-golf](https://github.com/openai/parameter-golf)** challenge codebase. Everything in the sections below (leaderboard rules, `records/`, training scripts) still follows OpenAI’s README unless noted otherwise; **what follows only documents extras intended for competitors** who want faster smoke tests, lightweight generation demos, experiment ledgers, and rough cross-GPU time ballparks.
+
+**Not affiliated with OpenAI.** For authoritative rules, compute grants, and Discord support, use the links in this file and the official repo.
+
+### What this fork adds (vs upstream)
+
+| Addition | Why it helps |
+|----------|----------------|
+| **[`scripts/download_cli_demo_checkpoint.py`](scripts/download_cli_demo_checkpoint.py)** | Get a Parameter-Golf-shaped **FP16** checkpoint **without running training** (random init: good for **wiring tests only**, not quality). Uses local [`demo_assets/baseline_demo_fp16.pt.lzma`](demo_assets/baseline_demo_fp16.pt.lzma) when you clone this fork, or URL / `PARAMETER_GOLF_DEMO_CKPT_URL` / `PARAMETER_GOLF_DEMO_RAW_BASE`. |
+| **[`scripts/generate_demo.py`](scripts/generate_demo.py)** | **Stream text** from a checkpoint compatible with `train_gpt.py` (`final_model.pt`, int8 round-trip payloads, DDP `module.*`, etc.). Uses **`GPT.forward_logits()`** added in this fork’s [`train_gpt.py`](train_gpt.py). Optional FineWeb val preview when `--data-path` and tokenizer are set. |
+| **`train_gpt.py` → `results.tsv` autolog** | On **rank 0**, append one row per run: **`COMPLETE`** (with round-trip **`val_bpb`**, peak VRAM, git short hash) or **`CRASH`**. Tunables: `EXPERIMENT_DESC`, `RESULTS_TSV_PATH`, `DISABLE_RESULTS_TSV=1`. File is **gitignored**—keep it for local analysis only. |
+| **[`analysis.ipynb`](analysis.ipynb)** | Plot / summarize **`results.tsv`** across many local experiments. |
+| **[`scripts/h100_time_guess.py`](scripts/h100_time_guess.py)** | **Napkin math**: compare your machine to **8×H100 / 10 min** peak TFLOPS, or **`check run.log`** for a step-based sanity check vs the **600 s** training cap (still verify on real H100). |
+| **[`agent.md`](agent.md)** | Long-form **local R&D playbook**: fork ↔ upstream hygiene, env vars, log greps, and an experiment loop tuned for iterative `train_gpt.py` work (including optional references in `EXPERIMENT_DESC`). |
+
+**Submission note:** Official **`records/`** PRs should still ship a self-contained `train_gpt.py` per challenge rules. The fork’s logging and demo helpers are for **development**; strip or justify any extra surface area before submitting if you want to stay byte-identical to a minimal record.
+
+### “One command” quickstarts (after clone + venv + deps)
+
+Use this fork so `demo_assets/` is present, or point `PARAMETER_GOLF_DEMO_CKPT_URL` at a hosted copy of `baseline_demo_fp16.pt.lzma`.
+
+**1) Demo checkpoint only (no training)**
+
+```bash
+python scripts/download_cli_demo_checkpoint.py -o cli_demo_checkpoint.pt
+```
+
+**2) Smoke-run streaming generation (needs SentencePiece tokenizer from data setup)**
+
+After you have `./data/tokenizers/fineweb_1024_bpe.model` (see [Getting Started](#getting-started)):
+
+```bash
+python scripts/generate_demo.py \
+  --checkpoint cli_demo_checkpoint.pt \
+  --tokenizer ./data/tokenizers/fineweb_1024_bpe.model \
+  --no-show-sample
+```
+
+Add `--data-path ./data/datasets/fineweb10B_sp1024/` to print a short FineWeb **val** decode before generation.
+
+**3) Log every training run to a TSV for the notebook**
+
+```bash
+EXPERIMENT_DESC="muon_lr_sweep_A" torchrun --standalone --nproc_per_node=1 train_gpt.py
+# …
+jupyter notebook analysis.ipynb  # or open analysis.ipynb in VS Code / JupyterLab
+```
+
+**4) Ballpark training time vs 8×H100**
+
+```bash
+python scripts/h100_time_guess.py
+python scripts/h100_time_guess.py check run.log
+```
+
+### Staying aligned with OpenAI
+
+```bash
+git remote add upstream https://github.com/openai/parameter-golf.git  # if missing
+git fetch upstream
+git log upstream/main..HEAD --oneline   # your fork-only commits
+```
+
+For day-to-day workflow details (branches, `results.tsv` columns, loop discipline), see **[`agent.md`](agent.md)**.
+
 ## Leaderboard
 
 | Run | Score | Author | Summary | Date | Info |
@@ -75,6 +142,13 @@ We'd love to see weird & creative ideas in the challenge, since you never know w
 - [ ] Learning adapters on random linear maps
 
 ## Getting Started
+
+**Repository choice**
+
+- **Official source:** `git clone https://github.com/openai/parameter-golf.git`
+- **This fork** (demo scripts, `results.tsv` logging, `analysis.ipynb`, `agent.md`, bundled `demo_assets/`): `git clone https://github.com/JianYan11/parameter-golf.git`
+
+The commands below use a generic `parameter-golf` directory name; use whichever clone matches your goal. The [Contestant toolkit](#contestant-toolkit-this-fork) section describes fork-only features.
 
 ### Training Your First Model (Mac with Apple Silicon)
 
