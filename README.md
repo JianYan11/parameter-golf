@@ -4,6 +4,10 @@ Language models are just fancy autocomplete: you predict the next token, then th
 
 ---
 
+https://github.com/user-attachments/assets/0229009b-9495-4bcf-a3c6-b8394bb42ffa
+
+
+
 ## See it spit tokens (CLI continuation)
 
 Grab a checkpoint, point `generate_demo.py` at the FineWeb tokenizer, and you get a **terminal-native** streaming session — the same mental model as training (autoregressive decode), except now you can *feel* whether your plumbing works before you've burned a GPU week. Here's what that looks like in practice:
