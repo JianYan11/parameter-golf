@@ -142,7 +142,7 @@ Work with the human once, then run the loop (§7.5):
    - [README.md](README.md) — challenge rules, FAQ, integrity.
    - [data/README.md](data/README.md) — data layout, tokenizer, export notes.
    - [`train_gpt.py`](train_gpt.py) — `Hyperparameters`, model, training loop, eval, int8+zlib serialization.
-   - [program.md](program.md) — this guide.
+   - [`agent.md`](agent.md) — this guide.
 5. **Verify data:** `fineweb_train_*.bin`, `fineweb_val_*.bin`, and tokenizer at `TOKENIZER_PATH`; if missing, run `python3 data/cached_challenge_fineweb.py --variant sp1024` (see §4).
 6. **`results.tsv`** is created automatically on the first **successful** [`train_gpt.py`](train_gpt.py) run (see §7.5). No manual header row is required.
 7. **Confirm** with the human that setup looks good, then enter the experiment loop.
